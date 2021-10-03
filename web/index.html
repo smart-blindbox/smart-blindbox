@@ -2,6 +2,7 @@
 <head>
 <script src="/ethers-5.4.6.umd.min.js" type="application/javascript"></script>
 <script src="/qrcode.min.js" type="application/javascript"></script>
+<script src="/crypto.js" type="application/javascript"></script>
 <title>blindbox.cash</title>
 <link rel="icon" href="/favicon.svg" />
 <style>
@@ -50,6 +51,28 @@
     background-image: linear-gradient(top, #26759e, #133d5b);filter:progid:DXImageTransform.Microsoft.gradient(GradientType=0,startColorstr=#26759e, endColorstr=#133d5b);
 }
 </style>
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function(reg) {
+
+    if(reg.installing) {
+      console.log('Service worker installing');
+    } else if(reg.waiting) {
+      console.log('Service worker installed');
+    } else if(reg.active) {
+      console.log('Service worker active');
+      setInterval(async function(){
+	const resp = await fetch("/sw/ping")
+	console.log(await resp.text())
+      }, 20000); // call /sw/ping every 20 seconds to keep service worker alive
+    }
+
+  }).catch(function(error) {
+    // registration failed
+    console.log('Registration failed with ' + error);
+  });
+}
+</script>
 </head>
 <body>
 <div style="width: 900px; margin: auto">
@@ -69,8 +92,10 @@
 	  name="T">Show PrivKey//显示私钥</a>
 </div>
 <br>
+<!--
 <p id="progressLine" style="display: none; text-align: center; font-size: 24px">
 <span id="progressText"></span><span id="progress"></span></p>
+-->
 <p id="qrcode" style="display: none; margin: 0 auto; width: 256px; text-align: center"></p>
 <p id="addr" style="display: none; margin: auto; text-align: center; font-size: 20px"></p>
 <hr>
@@ -78,7 +103,9 @@
 <script>
 
 function showQRCode(addr) {
-        var qrcode = new QRCode(document.getElementById("qrcode"), {
+	var elemQR = document.getElementById("qrcode") 
+	elemQR.innerText = ""
+        var qrcode = new QRCode(elemQR, {
             text: addr,
             width: 256,
             height: 256,
@@ -94,36 +121,35 @@ async function createWallet() {
 	if(password === null || password.length == 0) {
 		alert(T("No password entered. Abort wallet creation//密码未输入，放弃创建钱包"))
 	}
-	document.getElementById("progressLine").style.display = "block"
-	document.getElementById("progressText").innerText = T("Progress of Wallet Creation: //钱包创建进度：")
-	const progressSpan = document.getElementById("progress")
-	const encryptedJson = await wallet.encrypt(password, function(percentage) {
-		progressSpan.innerText = (percentage*100).toFixed(0)+"%"
-	})
-	document.getElementById("progressLine").style.display = "none"
-	localStorage.setItem("encryptedJson", encryptedJson)
+	console.log("0",wallet.mnemonic.phrase)
+	var encryptedData = await encrypt(wallet.mnemonic.phrase, password)
+	const encryptedDataAsHex = uint8ArrayToHex(new Uint8Array(encryptedData))
+
+	localStorage.setItem("encryptedDataAsHex", encryptedDataAsHex)
 	document.getElementById("addr").innerText = wallet.address
 	showQRCode(wallet.address)
-	window.wallet = wallet
+	window.Wallet = wallet
 	alert(T("Wallet created!//已成功创建钱包"))
 	withWallet()
+	const resp = await fetch("/sw/pw_set?"+encodeURIComponent(password))
+	console.log(await resp.text())
 }
 
 function deleteWallet() {
-	const ok = confirm(T("Please make sure you have backed up this wallet's mnemonics or private key, or there is no asset in this wallet.//请确认您已经备份了此钱包的助记词或者私钥，或者此钱包内已经没有资产"))
+	const ok = confirm(T("Please make sure you have backed up this wallet's mnemonic or private key, or there is no asset in this wallet.//请确认您已经备份了此钱包的助记词或者私钥，或者此钱包内已经没有资产"))
 	if(!ok) {return}
-	localStorage.removeItem("encryptedJson")
-	delete window.wallet
+	localStorage.removeItem("encryptedDataAsHex")
+	delete window.Wallet
 	alert(T("Wallet deleted!//已成功删除钱包"))
 	withoutWallet()
 }
 
 function showMnemonic() {
-	prompt(T("Your wallet's mnemonic://您的钱包的助记词："), window.wallet.mnemonic)
+	prompt(T("Your wallet's mnemonic://您的钱包的助记词："), window.Wallet.mnemonic.phrase)
 }
 
 function showPrivkey() {
-	prompt(T("Your wallet's private key://您的钱包的私钥："), window.wallet.privateKey)
+	prompt(T("Your wallet's private key://您的钱包的私钥："), window.Wallet.privateKey)
 }
 
 function withWallet(text) {
@@ -159,50 +185,47 @@ function T(text) {
 }
 
 async function unlockWallet() {
-	const encryptedJson = localStorage.getItem("encryptedJson")
 	const password = prompt(T("Please enter the password to unlock your wallet//请输入钱包的解锁密码"))
 	if(password === null || password.length == 0) {
 		alert(T("No password entered. Abort wallet unlocking//密码未输入，放弃解锁钱包"))
 		return
 	}
-	document.getElementById("progressLine").style.display = "block"
-	document.getElementById("progressText").innerText = T("Progress of Wallet Unlocking: //钱包解锁进度：")
-	const progressSpan = document.getElementById("progress")
-	try {
-		window.wallet = await ethers.Wallet.fromEncryptedJson(encryptedJson, password, (percentage) => {
-			progressSpan.innerText = (percentage*100).toFixed(0)+"%"
-		})
-	} catch (e) {
+	if(await unlockWalletWithPassword(password)) {
+		const resp = await fetch("/sw/pw_set?"+encodeURIComponent(password))
+		console.log(await resp.text())
+		showQRCode(window.Wallet.address)
+		withWallet()
+	} else {
 		alert(T("Failed to unlock your wallet, Please check your password//解锁失败，请检查密码是否正确"))
-		document.getElementById("progressLine").style.display = "none"
-		return
 	}
-	document.getElementById("addr").innerText = window.wallet.address
-	showQRCode(window.wallet.address)
-	document.getElementById("progressLine").style.display = "none"
-	withWallet();
 }
 
 window.addEventListener('DOMContentLoaded', async (event) => {
-    window.LANG = "en"
-    console.log(window.location.href)
-    if (window.location.href.endsWith("cn")) {
-        window.LANG = "cn"
-    } else if (window.location.href.endsWith("en")) {
-        window.LANG = "en"
-    } else if (navigator.language.startsWith("zh")) {
-        window.LANG = "cn"
-    }
-    var elems = document.getElementsByName("T")
-    for (var i = 0; i < elems.length; i++) {
-        elems[i].innerText = T(elems[i].innerText)
-    }
-    const encryptedJson = localStorage.getItem("encryptedJson")
-    if(encryptedJson === null) {
-       withoutWallet();
-    } else {
-       document.getElementById("unlockBtn").classList.remove('disabled')
-    }
+	window.LANG = "en"
+	console.log(window.location.href)
+	if (window.location.href.endsWith("cn")) {
+		window.LANG = "cn"
+	} else if (window.location.href.endsWith("en")) {
+		window.LANG = "en"
+	} else if (navigator.language.startsWith("zh")) {
+		window.LANG = "cn"
+	}
+	var elems = document.getElementsByName("T")
+	for (var i = 0; i < elems.length; i++) {
+		elems[i].innerText = T(elems[i].innerText)
+	}
+	const encryptedDataAsHex = localStorage.getItem("encryptedDataAsHex")
+	if(encryptedDataAsHex === null) {
+		withoutWallet();
+	} else {
+		document.getElementById("unlockBtn").classList.remove('disabled')
+		await tryInit()
+		if(window.Wallet) {
+			document.getElementById("addr").innerText = window.Wallet.address
+			showQRCode(window.Wallet.address)
+			withWallet();
+		}
+	}
 })
 </script>
 </body>
